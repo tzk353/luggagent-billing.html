@@ -126,7 +126,7 @@ input[type=date]:focus{border-color:#3b82f6}
     <input type="file" id="fileT" accept=".txt">
     <div class="icon">📂</div>
     <h3>上傳外群車單聊天記錄 (.txt)</h3>
-    <p>LINE 匯出的 txt 檔，包含黃博瑋發的車趟資訊</p>
+    <p>LINE 匯出的 txt 檔，包含車趟資訊</p>
     <div id="fileOkT" class="file-ok hidden">✅ <span id="fileNameT"></span></div>
   </div>
   <div id="parseMsgT" class="parse-msg"></div>
@@ -204,7 +204,7 @@ input[type=date]:focus{border-color:#3b82f6}
   </div>
   <div id="orderEmpty" class="empty-hint">
     <div class="eicon">📦</div>
-    <div>請上傳百世訂單的聊天記錄 txt 檔</div>
+    <div>請上傳訂單的聊天記錄 txt 檔</div>
   </div>
 </div>
 
@@ -495,7 +495,7 @@ function filterTrips(){
 }
 function clearTF(){ document.getElementById('tSearch').value=''; document.getElementById('tFrom').value=''; document.getElementById('tTo').value=''; filterTrips(); }
 
-function tripKey(t){ return (t.date||'x')+'_'+(t.time||'x')+'_'+(t.amount||'0')+'_'+t.raw.substring(10,30).replace(/\s/g,''); }
+function tripKey(t){ return 'trip_'+(t.date||'x')+'_'+(t.time||'x')+'_'+t.raw.substring(0,40).replace(/\s/g,'').replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g,''); }
 
 function renderTrips(){
   const container=document.getElementById('tripList');
@@ -532,7 +532,7 @@ function renderTrips(){
         <span class="chevron">▼</span></div>
       <div class="trip-body">
         <div class="trip-raw">${esc(t.raw)}</div>
-        <div class="note-area"><textarea id="tn_${key}" placeholder="核定金額或備註…" onchange="saveTNote('${key}')">${esc(note)}</textarea><button class="save-btn" onclick="saveTNote('${key}')">儲存</button></div>
+        <div class="note-area"><textarea id="tn_${key}" placeholder="核定金額或備註…">${esc(note)}</textarea><button class="save-btn" onclick="saveTNote('${key}')">儲存</button></div>
         ${note?`<div class="saved-note">✓ 已記錄：${esc(note)}</div>`:''}
       </div>`;
       group.appendChild(card);
@@ -547,8 +547,38 @@ function tCollapseAll(){ document.querySelectorAll('.trip-card').forEach(c=>c.cl
 function saveTNote(key){
   const ta=document.getElementById('tn_'+key); if(!ta) return;
   tNotes[key]=ta.value; localStorage.setItem('bsTrip2',JSON.stringify(tNotes));
-  const disp=ta.parentElement.nextElementSibling; if(disp){ disp.textContent=ta.value?'✓ 已記錄：'+ta.value:''; }
-  const rawSum=filteredT.reduce((s,t)=>s+(t.amount||0),0);
+  const card=ta.closest('.trip-card');
+  if(card){
+    // update saved note display
+    let disp=card.querySelector('.saved-note');
+    if(!disp){ disp=document.createElement('div'); disp.className='saved-note'; ta.parentElement.after(disp); }
+    disp.textContent=ta.value?'✓ 已記錄：'+ta.value:'';
+    // update amount badge in card header
+    const amtEl=card.querySelector('.trip-amt');
+    if(amtEl){
+      const v=ta.value?parseInt(ta.value.replace(/[^0-9]/g,'')):NaN;
+      if(!isNaN(v)&&v>0){
+        amtEl.textContent='$'+v.toLocaleString('zh-TW');
+        amtEl.classList.remove('none');
+      }
+    }
+    // update day total in parent group header
+    const group=card.closest('.day-group');
+    if(group){
+      const allCards=[...group.querySelectorAll('.trip-card')];
+      let daySum=0;
+      allCards.forEach(c=>{
+        const aEl=c.querySelector('.trip-amt');
+        if(aEl&&!aEl.classList.contains('none')){
+          const n=parseInt(aEl.textContent.replace(/[^0-9]/g,''));
+          if(!isNaN(n)) daySum+=n;
+        }
+      });
+      const dayHdr=group.querySelector('.day-total');
+      if(dayHdr) dayHdr.textContent='$'+daySum.toLocaleString('zh-TW');
+    }
+  }
+  // recalc overall note sum
   const noteSum=filteredT.reduce((s,t)=>{ const n=tNotes[tripKey(t)]; const v=n?parseInt(n.replace(/[^0-9]/g,'')):( t.amount||0); return s+(isNaN(v)?0:v); },0);
   document.getElementById('tNoteSum').textContent='$'+noteSum.toLocaleString('zh-TW');
 }
