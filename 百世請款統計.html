@@ -266,9 +266,12 @@ async function handleOrderFile(file) {
   if(!file) return;
   document.getElementById('fileNameO').textContent = file.name;
   document.getElementById('fileOkO').classList.remove('hidden');
-  setMsgO('解析中…');
+  setMsgO('讀取檔案中…');
   const text = await file.text();
-  ORDERS = parseOrders(text);
+  setMsgO('解析單號中，請稍候…');
+  // yield to browser so UI updates before heavy parse
+  await new Promise(r => setTimeout(r, 30));
+  ORDERS = await parseOrdersAsync(text);
   setMsgO(`✅ 解析完成，共找到 ${ORDERS.length} 個單號`);
   document.getElementById('orderControls').classList.remove('hidden');
   document.getElementById('orderEmpty').classList.add('hidden');
@@ -354,15 +357,16 @@ function parseTrips(text) {
 }
 
 // ══════════════════════════════════
-// PARSER - ORDERS (百世行李單)
+// PARSER - ORDERS (百世行李單) - 非同步分批，避免卡住
 // ══════════════════════════════════
-function parseOrders(text) {
+async function parseOrdersAsync(text) {
   const lines = text.split('\n');
   const chatDatePat = /^(\d{4})\.(\d{2})\.(\d{2})/;
   const msgPat = /^\d{2}:\d{2} .+/;
   const orderPat = /\b(LA[A-Z0-9]{5,10})\b/gi;
   const falsePosSet = new Set(['LABELLED','LANDING','LAKESHORE']);
   const pickupKws = ['接機資訊','取貨資訊','取件資訊','接送資訊','服務日期','Service Date'];
+  const YEAR_RE = /^20(2[5-9]|[3-9]\d)/;
 
   // Tag lines with chat date
   let cur=null;
@@ -373,9 +377,8 @@ function parseOrders(text) {
   });
 
   function getDetailBlock(start){
-    const block=[];
-    let j=start+1;
-    while(j<lines.length){
+    const block=[]; let j=start+1;
+    while(j<lines.length && j<start+60){
       const raw=lines[j].trim();
       if(msgPat.test(raw)||chatDatePat.test(raw)) break;
       if(raw) block.push(raw);
@@ -392,26 +395,35 @@ function parseOrders(text) {
     ];
     for(let i=0;i<detailLines.length;i++){
       const isPickup=pickupKws.some(k=>detailLines[i].includes(k));
-      const toSearch=isPickup?[detailLines[i],...(detailLines[i+1]?[detailLines[i+1]]:[])]:[];
-      if(isPickup) for(const sl of toSearch) for(const [pat,fmt] of pats){const m=pat.exec(sl);if(m) return fmt(m);}
+      if(isPickup){
+        const toSearch=[detailLines[i],...(detailLines[i+1]?[detailLines[i+1]]:[])];
+        for(const sl of toSearch) for(const [pat,fmt] of pats){const m=pat.exec(sl);if(m&&YEAR_RE.test(m[1]||m[3])) return fmt(m);}
+      }
     }
     for(const line of detailLines) for(const [pat,fmt] of pats){const m=pat.exec(line);if(m) return fmt(m);}
     return null;
   }
 
-  function getCtx(idx, window=3){
+  function getCtx(idx){
     const result=[];
-    for(let j=Math.max(0,idx-window);j<Math.min(lines.length,idx+window+1);j++){
+    for(let j=Math.max(0,idx-3);j<Math.min(lines.length,idx+4);j++){
       const raw=lines[j].trim();
       if(raw&&!chatDatePat.test(raw)) result.push([raw, /LA[A-Z0-9]{5,10}/i.test(raw)]);
     }
     return result;
   }
 
+  // ── Pass 1: scan lines for order numbers (chunked) ──
   const orderData={};
+  const CHUNK = 500;
   for(let i=0;i<lines.length;i++){
+    if(i % CHUNK === 0){
+      setMsgO(`解析中… ${Math.round(i/lines.length*100)}%`);
+      await new Promise(r=>setTimeout(r,0)); // yield
+    }
     const stripped=lines[i].trim();
-    if(!orderPat.test(stripped)){ orderPat.lastIndex=0; continue; }
+    orderPat.lastIndex=0;
+    if(!orderPat.test(stripped)) continue;
     orderPat.lastIndex=0;
     let m;
     while((m=orderPat.exec(stripped))!==null){
@@ -425,12 +437,17 @@ function parseOrders(text) {
         const sd=extractServiceDate(detail);
         if(sd) orderData[num].serviceDate=sd;
       }
-      orderData[num].mentions.push([lineDates[i],i,stripped,detail]);
+      // Store minimal mention info to save memory
+      orderData[num].mentions.push([lineDates[i],i,stripped]);
     }
     orderPat.lastIndex=0;
   }
 
-  return Object.keys(orderData).sort().map(num=>{
+  // ── Pass 2: build output objects ──
+  setMsgO('整理資料中…');
+  await new Promise(r=>setTimeout(r,0));
+
+  const result = Object.keys(orderData).sort().map(num=>{
     const info=orderData[num];
     const serviceDate=info.serviceDate||info.chatDate||'0000-00-00';
     const detail=info.detailBlock||[];
@@ -441,17 +458,22 @@ function parseOrders(text) {
       detailHtml=`<div class="detail-info"><div class="di-title">📋 服務資訊</div>${rows}</div>`;
     }
 
-    const mentionParts=info.mentions.map(([date,li,msg,det],bi)=>{
+    // Only show first 5 mentions to keep HTML light
+    const shownMentions = info.mentions.slice(0,5);
+    const mentionParts=shownMentions.map(([date,li,msg],bi)=>{
       const ctx=getCtx(li);
-      const ctxHtml=ctx.map(([t,hi])=>`<div class="msg-line ${num.toUpperCase()in t.toUpperCase()?'highlight':'ctx'}">${esc(t)}</div>`).join('');
+      const ctxHtml=ctx.map(([t,hi])=>`<div class="msg-line ${t.toUpperCase().includes(num)?'highlight':'ctx'}">${esc(t)}</div>`).join('');
       return `<div class="mention"><div class="mention-label">第${bi+1}次提及　${date||'日期不明'}</div>${ctxHtml}</div>`;
     }).join('');
+    const moreNote = info.mentions.length>5 ? `<div style="font-size:11px;color:#9ca3af;margin:4px 0 8px">…另有 ${info.mentions.length-5} 次提及</div>` : '';
 
-    const bodyHtml=detailHtml+`<div class="mentions-title">💬 對話記錄</div>`+mentionParts+
+    const bodyHtml=detailHtml+`<div class="mentions-title">💬 對話記錄</div>`+mentionParts+moreNote+
       `<div class="note-area"><textarea id="note_${num}" placeholder="填寫批價金額或備註…" onchange="saveONote('${num}')">{SAVED}</textarea><button class="save-btn" onclick="saveONote('${num}')">儲存</button></div><div id="saved_${num}" class="saved-note2 hidden"></div>`;
 
     return { num, cnt:info.mentions.length, service_date:serviceDate, detail:detail.slice(0,6).join(' '), body:bodyHtml };
   }).sort((a,b)=>a.service_date.localeCompare(b.service_date));
+
+  return result;
 }
 
 function esc(t){ return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
